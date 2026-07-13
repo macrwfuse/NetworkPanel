@@ -363,8 +363,6 @@ export class SpeedTestScheduler {
   /**
    * Converts cron expression to milliseconds.
    * Supports standard 5-field cron: minute hour day month weekday
-   * Examples: '0 */30 * * *' = every 30 minutes
-   *          '0 0 * * *' = midnight daily
    */
   private cronToMs(cron: string): number {
     if (!cron || cron.trim() === '') return 0
