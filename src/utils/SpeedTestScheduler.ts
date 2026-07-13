@@ -360,12 +360,11 @@ export class SpeedTestScheduler {
       this.scheduleNext()
     }, delay)
   }
-
   /**
-   * \u5c06 cron \u8868\u8fbe\u5f0f\u8f6c\u6362\u4e3a\u6beb\u79d2\u6570
-   * \u652f\u6301\u6807\u51c6 5 \u4f4d cron: minute hour day month weekday
-   * \u4f8b\u5982: "0 */30 * * *" = \u6bcf30\u5206\u949f
-   *      "0 0 * * *" = \u6bcf\u5929\u5348\u591c
+   * Converts cron expression to milliseconds.
+   * Supports standard 5-field cron: minute hour day month weekday
+   * Examples: "0 */30 * * *" = every 30 minutes
+   *          "0 0 * * *" = midnight daily
    */
   private cronToMs(cron: string): number {
     if (!cron || cron.trim() === '') return 0
