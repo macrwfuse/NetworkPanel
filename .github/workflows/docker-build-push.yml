@@ -51,6 +51,25 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
+      - name: Package dist as artifact
+        run: |
+          cd dist
+          tar -czf ../network-panel-dist.tar.gz .
+
+      - name: Create GitHub Release
+        id: create_release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: NetworkPanel ${{ github.ref_name }}
+          body: |
+            自动构建的 NetworkPanel 页面文件。
+            - 可直接部署到任意静态服务器
+            - 也可使用 Docker 部署
+          files: network-panel-dist.tar.gz
+          fail_on_unmatched_files: false
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
