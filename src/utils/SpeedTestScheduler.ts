@@ -2,7 +2,7 @@
  * SpeedTestScheduler - 定时测速调度器
  * 功能：
  * 1. 定时启动/停止测速
- * 2. 单次测速流量上限（默认5GB）
+ * 2. 单次测速流量上限（默认2GB）
  * 3. 历史测速记录与平均速度计算
  * 4. 速度告警阈值检测
  */
@@ -29,12 +29,13 @@ export interface AlertConfig {
 export interface SchedulerConfig {
   enabled: boolean
   intervalMs: number       // 测速间隔(毫秒)
+  cronExpression: string   // cron 表达式，如 "0 */30 * * * *" 表示每30分钟
   durationMs: number       // 每次测速持续时间(毫秒)，0=无限
   trafficLimitBytes: number // 单次测速流量上限(字节)
   maxRounds: number        // 最大测速轮次，0=无限
 }
 
-const FIVE_GB = 5 * 1024 * 1024 * 1024
+const TWO_GB = 2 * 1024 * 1024 * 1024
 
 export class SpeedTestScheduler {
   private records: SpeedTestRecord[] = []
@@ -55,9 +56,10 @@ export class SpeedTestScheduler {
   // 配置
   public scheduler: SchedulerConfig = {
     enabled: false,
-    intervalMs: 3600000,       // 默认1小时
+    intervalMs: 3600000,
+    cronExpression: '0 * * * *',     // 默认每小时整点
     durationMs: 300000,        // 默认5分钟
-    trafficLimitBytes: FIVE_GB,
+    trafficLimitBytes: TWO_GB,
     maxRounds: 0,
   }
 
@@ -336,12 +338,16 @@ export class SpeedTestScheduler {
   private scheduleNext() {
     if (!this.scheduler.enabled) return
 
+    // Parse cron expression and calculate next fire time
+    const nextDelay = this.cronToMs(this.scheduler.cronExpression)
+    const delay = nextDelay > 0 ? nextDelay : this.scheduler.intervalMs
+
     this.schedulerTimer = setTimeout(() => {
       this.currentRound++
       if (this.scheduler.maxRounds > 0 && this.currentRound > this.scheduler.maxRounds) {
         this.stopScheduler()
         if (this.alert.enabled) {
-          this.alert.onAlert(`🔔 定时测速已完成 ${this.scheduler.maxRounds} 轮`, 'success')
+          this.alert.onAlert(`\u{1F514} \u5b9a\u65f6\u6d4b\u901f\u5df2\u5b8c\u6210 ${this.scheduler.maxRounds} \u8f6e`, 'success')
         }
         return
       }
@@ -350,10 +356,54 @@ export class SpeedTestScheduler {
         this.onStart()
       }
 
-      // 间隔调度下一轮
+      // Schedule next round
       this.scheduleNext()
-    }, this.scheduler.intervalMs)
+    }, delay)
   }
+
+  /**
+   * \u5c06 cron \u8868\u8fbe\u5f0f\u8f6c\u6362\u4e3a\u6beb\u79d2\u6570
+   * \u652f\u6301\u6807\u51c6 5 \u4f4d cron: minute hour day month weekday
+   * \u4f8b\u5982: "0 */30 * * *" = \u6bcf30\u5206\u949f
+   *      "0 0 * * *" = \u6bcf\u5929\u5348\u591c
+   */
+  private cronToMs(cron: string): number {
+    if (!cron || cron.trim() === '') return 0
+    const parts = cron.trim().split(/\s+/)
+    if (parts.length !== 5) return 0
+
+    const [minute, hour, day, month, weekday] = parts
+
+    // Handle */N minute intervals
+    if (minute.startsWith('*/')) {
+      const step = parseInt(minute.split('/')[1], 10)
+      if (!isNaN(step) && step > 0 && step <= 60) {
+        return step * 60 * 1000
+      }
+    }
+
+    // Handle */N hour intervals
+    if (hour.startsWith('*/')) {
+      const step = parseInt(hour.split('/')[1], 10)
+      if (!isNaN(step) && step > 0 && step <= 24) {
+        return step * 60 * 60 * 1000
+      }
+    }
+
+    // Default: parse as specific time
+    const m = parseInt(minute, 10)
+    const h = parseInt(hour, 10)
+    if (!isNaN(m) && !isNaN(h) && m >= 0 && m < 60 && h >= 0 && h < 24) {
+      const now = new Date()
+      const next = new Date(now)
+      next.setHours(h, m, 0, 0)
+      if (next <= now) next.setDate(next.getDate() + 1)
+      return next.getTime() - now.getTime()
+    }
+
+    return 0
+  }
+
 
   private saveToStorage() {
     try {

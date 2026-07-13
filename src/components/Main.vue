@@ -359,7 +359,7 @@ const state = reactive({
   maxSpeed: localStorage.maxSpeed ? Number(localStorage.maxSpeed) : 0,
   // 单次测速统计
   testTraffic: 0,
-  testTrafficLimit: 5 * 1024 * 1024 * 1024, // 5GB
+  testTrafficLimit: 2 * 1024 * 1024 * 1024, // 2GB
   testAvgSpeed: 0,
   testSpeedSamples: [] as number[],
 })
@@ -683,12 +683,12 @@ var secEvent = () => {
     isRunning.value = false
     return
   }
-  // 检查单次测速5GB流量限制
+  // 检查单次测速2GB流量限制
   state.testTraffic = state.bytesUsed - state.startUse
   if (state.testTraffic >= state.testTrafficLimit) {
     ElNotification({
       title: '流量限制',
-      message: `单次测速已使用 ${formatter(state.testTraffic, 0, [0,0,0,1,2,2])}，达到 5GB 上限，自动停止`,
+      message: `单次测速已使用 ${formatter(state.testTraffic, 0, [0,0,0,1,2,2])}，达到 2GB 上限，自动停止`,
       type: 'warning',
       duration: 8000,
       position: 'top-right',
