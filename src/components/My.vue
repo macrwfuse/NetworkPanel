@@ -46,18 +46,36 @@ watch(loginStatus,(ns,os)=>{
   if(ns<=0)props.loginInfo.AccessToken=''
 })
 const api =async(action:string,args:object)=>{
-  const response = await fetch(import.meta.env.VITE_API_URL+action, {
-    method: "POST",
-    mode: "cors",
-    redirect: "follow",
-    referrerPolicy: "no-referrer",
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(args)
-})
-const resp=await response.json()
-return resp
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 10000)
+  try {
+    const response = await fetch(import.meta.env.VITE_API_URL+action, {
+      method: "POST",
+      mode: "cors",
+      redirect: "follow",
+      referrerPolicy: "no-referrer",
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(args),
+      signal: controller.signal
+    })
+    clearTimeout(timeoutId)
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+    }
+    const resp=await response.json()
+    return resp
+  } catch(err: any) {
+    clearTimeout(timeoutId)
+    if (err.name === 'AbortError') {
+      throw new Error('请求超时，请检查网络连接')
+    }
+    if (err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+      throw new Error('网络连接失败，可能存在跨域限制或服务器不可用')
+    }
+    throw err
+  }
 }
 const login=async()=>{
   imgBase64.value=''

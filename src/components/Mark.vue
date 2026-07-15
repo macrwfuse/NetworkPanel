@@ -109,13 +109,31 @@ watch(show,(ns,os)=>{
 const mark:Ref<any>=ref([])
 const api =async(args:string[][])=>{
   args.push(["cache", window.location.host])
-  const response = await fetch(import.meta.env.VITE_API_URL+"get.ajax?"+new URLSearchParams(args).toString(), {
-    mode: "cors",
-    redirect: "follow",
-    referrerPolicy: "no-referrer"
-  })
-  const resp=await response.json()
-  return resp
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), 10000)
+  try {
+    const response = await fetch(import.meta.env.VITE_API_URL+"get.ajax?"+new URLSearchParams(args).toString(), {
+      mode: "cors",
+      redirect: "follow",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal
+    })
+    clearTimeout(timeoutId)
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+    }
+    const resp=await response.json()
+    return resp
+  } catch(err: any) {
+    clearTimeout(timeoutId)
+    if (err.name === 'AbortError') {
+      throw new Error('请求超时，请检查网络连接')
+    }
+    if (err.message?.includes('Failed to fetch') || err.message?.includes('NetworkError')) {
+      throw new Error('网络连接失败，可能存在跨域限制或服务器不可用')
+    }
+    throw err
+  }
 }
 
 const typeMatch=(str:string)=>{
@@ -144,8 +162,9 @@ const refreshMark=async()=>{
       element.type=typeMatch(element.isp)
       mark.value.push(element)
     });
-  }catch(err){
-    ElMessageBox.alert('无法获取榜单信息，可能是后端服务器异常', '错误', {
+  }catch(err: any){
+    const msg = err.message || '未知错误'
+    ElMessageBox.alert(`无法获取榜单信息：${msg}`, '错误', {
       confirmButtonText: '确定'
     })
   }
