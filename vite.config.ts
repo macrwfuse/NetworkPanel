@@ -65,7 +65,17 @@ export default defineConfig({
   server: {
     open: true,
     port: 3005,
-    host: '0.0.0.0'
+    host: '0.0.0.0',
+    proxy: {
+      '/proxy': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/health': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+    },
   },
   base: './'
 })

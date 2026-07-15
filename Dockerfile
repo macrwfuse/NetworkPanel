@@ -23,7 +23,12 @@ RUN pnpm run build
 # ============================================
 # Stage 2: 运行
 # ============================================
-FROM nginx:stable-alpine
+FROM node:20-alpine
+
+WORKDIR /app
+
+# 安装 nginx
+RUN apk add --no-cache nginx
 
 # 复制 nginx 配置
 COPY nginx.conf /etc/nginx/conf.d/default.conf
@@ -31,9 +36,16 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 # 复制构建产物
 COPY --from=builder /app/dist /usr/share/nginx/html
 
+# 复制代理服务
+COPY server /app/server
+
+# 复制启动脚本
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+
 # 确保静态资源权限正确
 RUN chmod -R 755 /usr/share/nginx/html
 
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["/app/start.sh"]

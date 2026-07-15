@@ -6,7 +6,7 @@
  * 3. 历史测速记录与平均速度计算
  * 4. 速度告警阈值检测
  * 5. 多通道告警：Slack / 钉钉(DingTalk) / 飞书(Feishu/Lark)
- * 6. Slack 告警代理转发至钉钉/飞书
+ * 6. 通过 /proxy 代理解决浏览器 CORS 限制
  */
 
 export interface SpeedTestRecord {
@@ -21,21 +21,20 @@ export interface SpeedTestRecord {
 
 export interface DingTalkConfig {
   enabled: boolean
-  webhookUrl: string       // 钉钉自定义机器人 Webhook URL
-  secret: string           // 加签密钥（可选，HmacSHA256）
-  atMobiles: string[]      // @指定手机号
-  atAll: boolean           // @所有人
+  webhookUrl: string
+  secret: string
+  atMobiles: string[]
+  atAll: boolean
 }
 
 export interface FeishuConfig {
   enabled: boolean
-  webhookUrl: string       // 飞书自定义机器人 Webhook URL
-  secret: string           // 加签密钥（可选）
+  webhookUrl: string
+  secret: string
 }
 
 export interface SlackProxyConfig {
   enabled: boolean
-  /** 启用后，Slack 告警会同时转发到钉钉和/或飞书 */
   forwardToDingTalk: boolean
   forwardToFeishu: boolean
 }
@@ -44,22 +43,18 @@ export interface AlertConfig {
   enabled: boolean
   minSpeed: number
   maxLatency: number
-  // Slack
   slackWebhookUrl: string
   slackEnabled: boolean
-  // 钉钉
   dingtalk: DingTalkConfig
-  // 飞书
   feishu: FeishuConfig
-  // Slack 代理转发
   slackProxy: SlackProxyConfig
   onAlert: (message: string, type: 'warning' | 'error' | 'success') => void
 }
 
 export interface SchedulerConfig {
   enabled: boolean
-  cronExpression: string   // 标准 5 字段 cron: "分 时 日 月 周"
-  durationMs: number       // 每次测速持续时间(毫秒)，0=无限
+  cronExpression: string
+  durationMs: number
   trafficLimitBytes: number
   maxRounds: number
 }
@@ -67,9 +62,22 @@ export interface SchedulerConfig {
 const TWO_GB = 2 * 1024 * 1024 * 1024
 
 // ============================================================
-//  Cron 解析器 — 支持标准 5 字段表达式
-//  字段: minute hour dayOfMonth month dayOfWeek
-//  支持: *  ,  -  /  特定值
+//  代理请求 — 解决浏览器 CORS 限制
+// ============================================================
+
+async function proxyFetch(targetUrl: string, body: string): Promise<any> {
+  const proxyUrl = `/proxy?url=${encodeURIComponent(targetUrl)}`
+  const resp = await fetch(proxyUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  })
+  const text = await resp.text()
+  try { return JSON.parse(text) } catch { return { _raw: text, _status: resp.status } }
+}
+
+// ============================================================
+//  Cron 解析器
 // ============================================================
 
 interface CronFields {
@@ -114,108 +122,82 @@ function parseCron(expr: string): CronFields | null {
       hours: parseCronField(parts[1], 0, 23),
       days: parseCronField(parts[2], 1, 31),
       months: parseCronField(parts[3], 1, 12),
-      weekdays: parseCronField(parts[4], 0, 6), // 0=周日
+      weekdays: parseCronField(parts[4], 0, 6),
     }
-  } catch {
-    return null
-  }
+  } catch { return null }
 }
 
-/**
- * 计算从 now 起，下一次匹配 cron 的时间
- * @returns 延迟毫秒数，-1 表示无法计算
- */
 function nextCronDelay(cron: CronFields, now: Date = new Date()): number {
-  const maxSearchMinutes = 366 * 24 * 60 // 最多搜索一年
+  const maxSearch = 366 * 24 * 60
   const candidate = new Date(now)
   candidate.setSeconds(0, 0)
-  // 从下一分钟开始
   candidate.setMinutes(candidate.getMinutes() + 1)
-
-  for (let i = 0; i < maxSearchMinutes; i++) {
-    const m = candidate.getMinutes()
-    const h = candidate.getHours()
-    const d = candidate.getDate()
-    const mo = candidate.getMonth() + 1
-    const wd = candidate.getDay()
-
+  for (let i = 0; i < maxSearch; i++) {
     if (
-      cron.minutes.has(m) &&
-      cron.hours.has(h) &&
-      cron.days.has(d) &&
-      cron.months.has(mo) &&
-      cron.weekdays.has(wd)
+      cron.minutes.has(candidate.getMinutes()) &&
+      cron.hours.has(candidate.getHours()) &&
+      cron.days.has(candidate.getDate()) &&
+      cron.months.has(candidate.getMonth() + 1) &&
+      cron.weekdays.has(candidate.getDay())
     ) {
-      const delay = candidate.getTime() - now.getTime()
-      return delay > 0 ? delay : 0
+      return Math.max(candidate.getTime() - now.getTime(), 0)
     }
     candidate.setMinutes(candidate.getMinutes() + 1)
   }
   return -1
 }
 
-/** 格式化 cron 表达式的中文描述 */
 export function describeCron(expr: string): string {
   const cron = parseCron(expr)
   if (!cron) return '（无效的 Cron 表达式）'
-
   const parts: string[] = []
-
-  // 月份
   if (cron.months.size < 12) {
-    const monthNames = ['', '1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']
-    parts.push([...cron.months].map(m => monthNames[m]).join(','))
+    const mn = ['', '1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月']
+    parts.push([...cron.months].map(m => mn[m]).join(','))
   }
-
-  // 星期
   if (cron.weekdays.size < 7) {
-    const dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-    parts.push([...cron.weekdays].map(d => dayNames[d]).join(','))
+    const dn = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    parts.push([...cron.weekdays].map(d => dn[d]).join(','))
   }
-
-  // 日
-  if (cron.days.size < 31) {
-    parts.push(`每月${[...cron.days].join(',')}日`)
-  }
-
-  // 时
-  if (cron.hours.size < 24) {
-    parts.push(`${[...cron.hours].join(',')}时`)
-  }
-
-  // 分
-  if (cron.minutes.size < 60) {
-    parts.push(`${[...cron.minutes].join(',')}分`)
-  }
-
+  if (cron.days.size < 31) parts.push(`每月${[...cron.days].join(',')}日`)
+  if (cron.hours.size < 24) parts.push(`${[...cron.hours].join(',')}时`)
+  if (cron.minutes.size < 60) parts.push(`${[...cron.minutes].join(',')}分`)
   if (parts.length === 0) return '每分钟执行'
-
-  // 检查常见模式
-  if (
-    cron.minutes.size === 60 &&
-    cron.hours.size === 24 &&
-    cron.days.size === 31 &&
-    cron.months.size === 12 &&
-    cron.weekdays.size === 7
-  ) {
-    return '每分钟执行'
-  }
-
   return parts.join(' ')
 }
 
 // ============================================================
-//  钉钉签名工具
+//  钉钉签名
 // ============================================================
 
 async function dingTalkSign(secret: string, timestamp: number): Promise<string> {
-  const stringToSign = `${timestamp}\n${secret}`
-  const encoder = new TextEncoder()
-  const key = await crypto.subtle.importKey(
-    'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-  )
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(stringToSign))
-  return btoa(String.fromCharCode(...new Uint8Array(signature)))
+  const str = `${timestamp}\n${secret}`
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(str))
+  return btoa(String.fromCharCode(...new Uint8Array(sig)))
+}
+
+// ============================================================
+//  消息格式化
+// ============================================================
+
+const STOP_REASONS: Record<string, string> = {
+  manual: '手动停止', traffic_limit: '流量上限', schedule: '定时结束', alert: '告警触发',
+}
+
+function buildResultText(record: SpeedTestRecord, reason: string, fmt: SpeedTestScheduler): string {
+  return [
+    `✅ 检测状态：${STOP_REASONS[reason] || reason}`,
+    `🕐 检测时间：${new Date(record.timestamp).toLocaleString()}`,
+    `⏱ 测速耗时：${fmt.formatDuration(record.duration)}`,
+    '',
+    `⬇ 平均速度：${fmt.formatSpeed(record.avgSpeed)}`,
+    `⬆ 峰值速度：${fmt.formatSpeed(record.peakSpeed)}`,
+    `📡 平均带宽：${fmt.formatBandwidth(record.avgBandwidth)}`,
+    '',
+    `📊 使用流量：${fmt.formatBytes(record.bytesUsed)}`,
+  ].join('\n')
 }
 
 // ============================================================
@@ -226,12 +208,12 @@ export class SpeedTestScheduler {
   private records: SpeedTestRecord[] = []
   private schedulerTimer: ReturnType<typeof setTimeout> | null = null
   private durationTimer: ReturnType<typeof setTimeout> | null = null
-  private currentRound: number = 0
-  private testStartTime: number = 0
-  private testStartBytes: number = 0
-  private peakSpeed: number = 0
+  private currentRound = 0
+  private testStartTime = 0
+  private testStartBytes = 0
+  private peakSpeed = 0
   private speedSamples: number[] = []
-  private isRunning: boolean = false
+  private isRunning = false
   private cronFields: CronFields | null = null
 
   private onStart: (() => void) | null = null
@@ -252,23 +234,9 @@ export class SpeedTestScheduler {
     maxLatency: 0,
     slackWebhookUrl: '',
     slackEnabled: false,
-    dingtalk: {
-      enabled: false,
-      webhookUrl: '',
-      secret: '',
-      atMobiles: [],
-      atAll: false,
-    },
-    feishu: {
-      enabled: false,
-      webhookUrl: '',
-      secret: '',
-    },
-    slackProxy: {
-      enabled: false,
-      forwardToDingTalk: true,
-      forwardToFeishu: true,
-    },
+    dingtalk: { enabled: false, webhookUrl: '', secret: '', atMobiles: [], atAll: false },
+    feishu: { enabled: false, webhookUrl: '', secret: '' },
+    slackProxy: { enabled: false, forwardToDingTalk: true, forwardToFeishu: true },
     onAlert: () => {},
   }
 
@@ -277,623 +245,244 @@ export class SpeedTestScheduler {
     this.cronFields = parseCron(this.scheduler.cronExpression)
   }
 
-  // === 公共方法 ===
+  // === 通知方法（全部通过 /proxy 代理） ===
 
-  /**
-   * 发送 Slack Webhook 通知
-   */
   async sendSlackNotification(text: string, type: 'warning' | 'error' | 'success' = 'success') {
     if (!this.alert.slackEnabled || !this.alert.slackWebhookUrl) return
     const emoji = { warning: '⚠️', error: '❌', success: '✅' }[type]
     try {
-      await fetch(this.alert.slackWebhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: `${emoji} *NetworkPanel 测速告警*`,
-          blocks: [
-            {
-              type: 'header',
-              text: { type: 'plain_text', text: `${emoji} 测速告警`, emoji: true }
-            },
-            {
-              type: 'section',
-              text: { type: 'mrkdwn', text }
-            },
-            {
-              type: 'context',
-              elements: [{ type: 'mrkdwn', text: `🕐 ${new Date().toLocaleString()}` }]
-            }
-          ]
-        })
-      })
-
-      // Slack 代理转发
+      await proxyFetch(this.alert.slackWebhookUrl, JSON.stringify({
+        text: `${emoji} *NetworkPanel 测速告警*`,
+        blocks: [
+          { type: 'header', text: { type: 'plain_text', text: `${emoji} 测速告警`, emoji: true } },
+          { type: 'section', text: { type: 'mrkdwn', text } },
+          { type: 'context', elements: [{ type: 'mrkdwn', text: `🕐 ${new Date().toLocaleString()}` }] },
+        ]
+      }))
       if (this.alert.slackProxy.enabled) {
-        if (this.alert.slackProxy.forwardToDingTalk) {
-          await this.sendDingTalkNotification(text, type)
-        }
-        if (this.alert.slackProxy.forwardToFeishu) {
-          await this.sendFeishuNotification(text, type)
-        }
+        if (this.alert.slackProxy.forwardToDingTalk) await this.sendDingTalkNotification(text, type)
+        if (this.alert.slackProxy.forwardToFeishu) await this.sendFeishuNotification(text, type)
       }
-    } catch (err) {
-      console.error('Slack notification failed:', err)
-    }
+    } catch (err) { console.error('Slack notification failed:', err) }
   }
 
-  /**
-   * 发送测速结果表格到 Slack
-   */
   async sendSlackTable(record: SpeedTestRecord, reason: string) {
     if (!this.alert.slackEnabled || !this.alert.slackWebhookUrl) return
     try {
-      const reasonText: Record<string, string> = {
-        manual: '手动停止', traffic_limit: '流量上限', schedule: '定时结束', alert: '告警触发'
-      }
-      await fetch(this.alert.slackWebhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: '✅ *NetworkPanel 测速结果*',
-          blocks: [
-            {
-              type: 'header',
-              text: { type: 'plain_text', text: '✅ 测速结果', emoji: true }
-            },
-            {
-              type: 'section',
-              fields: [
-                { type: 'mrkdwn', text: `*停止原因*
-${reasonText[reason] || reason}` },
-                { type: 'mrkdwn', text: `*测速时长*
-${this.formatDuration(record.duration)}` },
-                { type: 'mrkdwn', text: `*使用流量*
-${this.formatBytes(record.bytesUsed)}` },
-                { type: 'mrkdwn', text: `*平均速度*
-${this.formatSpeed(record.avgSpeed)}` },
-                { type: 'mrkdwn', text: `*平均带宽*
-${this.formatBandwidth(record.avgBandwidth)}` },
-                { type: 'mrkdwn', text: `*峰值速度*
-${this.formatSpeed(record.peakSpeed)}` }
-              ]
-            },
-            {
-              type: 'context',
-              elements: [{ type: 'mrkdwn', text: `🕐 ${new Date(record.timestamp).toLocaleString()}` }]
-            }
-          ]
-        })
-      })
-
+      const r = STOP_REASONS[reason] || reason
+      await proxyFetch(this.alert.slackWebhookUrl, JSON.stringify({
+        text: '✅ *NetworkPanel 测速结果*',
+        blocks: [
+          { type: 'header', text: { type: 'plain_text', text: '✅ 测速结果', emoji: true } },
+          { type: 'section', fields: [
+            { type: 'mrkdwn', text: `*停止原因*\n${r}` },
+            { type: 'mrkdwn', text: `*测速时长*\n${this.formatDuration(record.duration)}` },
+            { type: 'mrkdwn', text: `*使用流量*\n${this.formatBytes(record.bytesUsed)}` },
+            { type: 'mrkdwn', text: `*平均速度*\n${this.formatSpeed(record.avgSpeed)}` },
+            { type: 'mrkdwn', text: `*平均带宽*\n${this.formatBandwidth(record.avgBandwidth)}` },
+            { type: 'mrkdwn', text: `*峰值速度*\n${this.formatSpeed(record.peakSpeed)}` },
+          ]},
+          { type: 'context', elements: [{ type: 'mrkdwn', text: `🕐 ${new Date(record.timestamp).toLocaleString()}` }] },
+        ]
+      }))
       if (this.alert.slackProxy.enabled) {
-        if (this.alert.slackProxy.forwardToDingTalk) {
-          await this.sendDingTalkTable(record, reason)
-        }
-        if (this.alert.slackProxy.forwardToFeishu) {
-          await this.sendFeishuTable(record, reason)
-        }
+        if (this.alert.slackProxy.forwardToDingTalk) await this.sendDingTalkTable(record, reason)
+        if (this.alert.slackProxy.forwardToFeishu) await this.sendFeishuTable(record, reason)
       }
-    } catch (err) {
-      console.error('Slack table notification failed:', err)
-    }
+    } catch (err) { console.error('Slack table notification failed:', err) }
   }
 
-  /**
-   * 发送钉钉 Webhook 通知
-   */
   async sendDingTalkNotification(text: string, type: 'warning' | 'error' | 'success' = 'success') {
     if (!this.alert.dingtalk.enabled || !this.alert.dingtalk.webhookUrl) return
     const emoji = { warning: '⚠️', error: '❌', success: '✅' }[type]
     const title = `${emoji} NetworkPanel 测速告警`
-
     try {
       let url = this.alert.dingtalk.webhookUrl
-
       if (this.alert.dingtalk.secret) {
-        const timestamp = Date.now()
-        const sign = await dingTalkSign(this.alert.dingtalk.secret, timestamp)
-        const sep = url.includes('?') ? '&' : '?'
-        url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
+        const ts = Date.now()
+        const sign = await dingTalkSign(this.alert.dingtalk.secret, ts)
+        url += (url.includes('?') ? '&' : '?') + `timestamp=${ts}&sign=${encodeURIComponent(sign)}`
       }
-
-      const fullText = `${title}
-
-${text}
-
-🕐 ${new Date().toLocaleString()}`
-
-      // 优先用 markdown，标题+正文
-      const body: any = {
-        msgtype: 'markdown',
-        markdown: { title, text: fullText },
-        at: {
-          atMobiles: this.alert.dingtalk.atMobiles || [],
-          isAtAll: this.alert.dingtalk.atAll || false,
-        }
-      }
-
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      })
-
-      // 如果 markdown 失败，降级为 text
-      const result = await resp.json().catch(() => ({}))
+      const fullText = `${title}\n\n${text}\n\n🕐 ${new Date().toLocaleString()}`
+      const at = { atMobiles: this.alert.dingtalk.atMobiles || [], isAtAll: this.alert.dingtalk.atAll || false }
+      const result = await proxyFetch(url, JSON.stringify({ msgtype: 'markdown', markdown: { title, text: fullText }, at }))
       if (result.errcode && result.errcode !== 0) {
-        console.warn('DingTalk markdown failed, falling back to text:', result)
-        await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            msgtype: 'text',
-            text: { content: fullText },
-            at: body.at
-          })
-        })
+        await proxyFetch(url, JSON.stringify({ msgtype: 'text', text: { content: fullText }, at }))
       }
-    } catch (err) {
-      console.error('DingTalk notification failed:', err)
-    }
+    } catch (err) { console.error('DingTalk notification failed:', err) }
   }
 
-  /**
-   * 发送飞书 Webhook 通知
-   */
   async sendFeishuNotification(text: string, type: 'warning' | 'error' | 'success' = 'success') {
     if (!this.alert.feishu.enabled || !this.alert.feishu.webhookUrl) return
     const emoji = { warning: '⚠️', error: '❌', success: '✅' }[type]
     const title = `${emoji} NetworkPanel 测速告警`
-
     try {
       let url = this.alert.feishu.webhookUrl
-
       if (this.alert.feishu.secret) {
-        const timestamp = Math.floor(Date.now() / 1000).toString()
-        const stringToSign = `${timestamp}\n${this.alert.feishu.secret}`
-        const encoder = new TextEncoder()
-        const key = await crypto.subtle.importKey(
-          'raw', encoder.encode(stringToSign), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-        )
-        const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(stringToSign))
-        const sign = btoa(String.fromCharCode(...new Uint8Array(signature)))
-        const sep = url.includes('?') ? '&' : '?'
-        url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
+        const ts = Math.floor(Date.now() / 1000).toString()
+        const str = `${ts}\n${this.alert.feishu.secret}`
+        const enc = new TextEncoder()
+        const key = await crypto.subtle.importKey('raw', enc.encode(str), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+        const sig = await crypto.subtle.sign('HMAC', key, enc.encode(str))
+        const sign = btoa(String.fromCharCode(...new Uint8Array(sig)))
+        url += (url.includes('?') ? '&' : '?') + `timestamp=${ts}&sign=${encodeURIComponent(sign)}`
       }
-
       const fullText = `${title}\n\n${text}\n\n🕐 ${new Date().toLocaleString()}`
-
-      // 先用卡片消息
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          msg_type: 'interactive',
-          card: {
-            header: {
-              title: { tag: 'plain_text', content: title },
-              template: type === 'error' ? 'red' : type === 'warning' ? 'orange' : 'green'
-            },
-            elements: [
-              { tag: 'markdown', content: fullText }
-            ]
-          }
-        })
-      })
-
-      // 如果卡片失败，降级为 text
-      const result = await resp.json().catch(() => ({}))
+      const result = await proxyFetch(url, JSON.stringify({
+        msg_type: 'interactive',
+        card: { header: { title: { tag: 'plain_text', content: title }, template: type === 'error' ? 'red' : type === 'warning' ? 'orange' : 'green' }, elements: [{ tag: 'markdown', content: fullText }] }
+      }))
       if (result.code && result.code !== 0) {
-        console.warn('Feishu card failed, falling back to text:', result)
-        await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            msg_type: 'text',
-            content: { text: fullText }
-          })
-        })
+        await proxyFetch(url, JSON.stringify({ msg_type: 'text', content: { text: fullText } }))
       }
-    } catch (err) {
-      console.error('Feishu notification failed:', err)
-    }
+    } catch (err) { console.error('Feishu notification failed:', err) }
   }
 
-  /**
-   * 发送测速结果到钉钉
-   */
   async sendDingTalkTable(record: SpeedTestRecord, reason: string) {
     if (!this.alert.dingtalk.enabled || !this.alert.dingtalk.webhookUrl) return
-    const reasonText: Record<string, string> = {
-      manual: '手动停止', traffic_limit: '流量上限', schedule: '定时结束', alert: '告警触发'
-    }
-
     try {
       let url = this.alert.dingtalk.webhookUrl
-
       if (this.alert.dingtalk.secret) {
-        const timestamp = Date.now()
-        const sign = await dingTalkSign(this.alert.dingtalk.secret, timestamp)
-        const sep = url.includes('?') ? '&' : '?'
-        url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
+        const ts = Date.now()
+        const sign = await dingTalkSign(this.alert.dingtalk.secret, ts)
+        url += (url.includes('?') ? '&' : '?') + `timestamp=${ts}&sign=${encodeURIComponent(sign)}`
       }
-
       const title = '✅ NetworkPanel 测速结果'
-      const text = [
-        `✅ **检测状态：**${reasonText[reason] || reason}`,
-        `🕐 **检测时间：**${new Date(record.timestamp).toLocaleString()}`,
-        `⏱ **测速耗时：**${this.formatDuration(record.duration)}`,
-        '',
-        '⬇ **平均速度：**' + this.formatSpeed(record.avgSpeed),
-        '⬆ **峰值速度：**' + this.formatSpeed(record.peakSpeed),
-        '📡 **平均带宽：**' + this.formatBandwidth(record.avgBandwidth),
-        '',
-        `📊 **使用流量：**${this.formatBytes(record.bytesUsed)}`,
-      ].join('\n')
-
-      // 先尝试 markdown
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          msgtype: 'markdown',
-          markdown: { title, text },
-          at: {
-            atMobiles: this.alert.dingtalk.atMobiles || [],
-            isAtAll: this.alert.dingtalk.atAll || false,
-          }
-        })
-      })
-
-      // markdown 失败则降级为 text
-      const result = await resp.json().catch(() => ({}))
+      const text = buildResultText(record, reason, this)
+      const at = { atMobiles: this.alert.dingtalk.atMobiles || [], isAtAll: this.alert.dingtalk.atAll || false }
+      const result = await proxyFetch(url, JSON.stringify({ msgtype: 'markdown', markdown: { title, text }, at }))
       if (result.errcode && result.errcode !== 0) {
-        console.warn('DingTalk markdown failed, falling back to text:', result)
-        await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            msgtype: 'text',
-            text: { content: text },
-            at: {
-              atMobiles: this.alert.dingtalk.atMobiles || [],
-              isAtAll: this.alert.dingtalk.atAll || false,
-            }
-          })
-        })
+        await proxyFetch(url, JSON.stringify({ msgtype: 'text', text: { content: text }, at }))
       }
-    } catch (err) {
-      console.error('DingTalk table notification failed:', err)
-    }
+    } catch (err) { console.error('DingTalk table failed:', err) }
   }
 
-  /**
-   * 发送测速结果到飞书
-   */
   async sendFeishuTable(record: SpeedTestRecord, reason: string) {
     if (!this.alert.feishu.enabled || !this.alert.feishu.webhookUrl) return
-    const reasonText: Record<string, string> = {
-      manual: '手动停止', traffic_limit: '流量上限', schedule: '定时结束', alert: '告警触发'
-    }
-
     try {
       let url = this.alert.feishu.webhookUrl
-
       if (this.alert.feishu.secret) {
-        const timestamp = Math.floor(Date.now() / 1000).toString()
-        const stringToSign = `${timestamp}\n${this.alert.feishu.secret}`
-        const encoder = new TextEncoder()
-        const key = await crypto.subtle.importKey(
-          'raw', encoder.encode(stringToSign), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-        )
-        const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(stringToSign))
-        const sign = btoa(String.fromCharCode(...new Uint8Array(signature)))
-        const sep = url.includes('?') ? '&' : '?'
-        url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
+        const ts = Math.floor(Date.now() / 1000).toString()
+        const str = `${ts}\n${this.alert.feishu.secret}`
+        const enc = new TextEncoder()
+        const key = await crypto.subtle.importKey('raw', enc.encode(str), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+        const sig = await crypto.subtle.sign('HMAC', key, enc.encode(str))
+        const sign = btoa(String.fromCharCode(...new Uint8Array(sig)))
+        url += (url.includes('?') ? '&' : '?') + `timestamp=${ts}&sign=${encodeURIComponent(sign)}`
       }
-
-      const content = [
-        `✅ **检测状态：**${reasonText[reason] || reason}`,
-        `🕐 **检测时间：**${new Date(record.timestamp).toLocaleString()}`,
-        `⏱ **测速耗时：**${this.formatDuration(record.duration)}`,
-        '',
-        '⬇ **平均速度：**' + this.formatSpeed(record.avgSpeed),
-        '⬆ **峰值速度：**' + this.formatSpeed(record.peakSpeed),
-        '📡 **平均带宽：**' + this.formatBandwidth(record.avgBandwidth),
-        '',
-        `📊 **使用流量：**${this.formatBytes(record.bytesUsed)}`,
-      ].join('\n')
-
-      // 先尝试卡片消息
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          msg_type: 'interactive',
-          card: {
-            header: {
-              title: { tag: 'plain_text', content: '✅ NetworkPanel 测速结果' },
-              template: 'green'
-            },
-            elements: [
-              { tag: 'markdown', content }
-            ]
-          }
-        })
-      })
-
-      // 卡片失败则降级为 text
-      const result = await resp.json().catch(() => ({}))
+      const content = buildResultText(record, reason, this)
+      const result = await proxyFetch(url, JSON.stringify({
+        msg_type: 'interactive',
+        card: { header: { title: { tag: 'plain_text', content: '✅ NetworkPanel 测速结果' }, template: 'green' }, elements: [{ tag: 'markdown', content }] }
+      }))
       if (result.code && result.code !== 0) {
-        console.warn('Feishu card failed, falling back to text:', result)
-        await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            msg_type: 'text',
-            content: { text: content }
-          })
-        })
+        await proxyFetch(url, JSON.stringify({ msg_type: 'text', content: { text: content } }))
       }
-    } catch (err) {
-      console.error('Feishu table notification failed:', err)
-    }
+    } catch (err) { console.error('Feishu table failed:', err) }
   }
 
-  /**
-   * 统一告警广播 — 向所有已启用通道发送通知
-   */
   async broadcastAlert(text: string, type: 'warning' | 'error' | 'success' = 'success') {
-    const promises: Promise<void>[] = []
-
-    if (this.alert.slackEnabled && this.alert.slackWebhookUrl) {
-      promises.push(this.sendSlackNotification(text, type))
-    }
-    if (this.alert.dingtalk.enabled && this.alert.dingtalk.webhookUrl) {
-      promises.push(this.sendDingTalkNotification(text, type))
-    }
-    if (this.alert.feishu.enabled && this.alert.feishu.webhookUrl) {
-      promises.push(this.sendFeishuNotification(text, type))
-    }
-
-    await Promise.allSettled(promises)
+    await Promise.allSettled([
+      this.alert.slackEnabled && this.alert.slackWebhookUrl ? this.sendSlackNotification(text, type) : null,
+      this.alert.dingtalk.enabled && this.alert.dingtalk.webhookUrl ? this.sendDingTalkNotification(text, type) : null,
+      this.alert.feishu.enabled && this.alert.feishu.webhookUrl ? this.sendFeishuNotification(text, type) : null,
+    ].filter(Boolean))
   }
 
-  /**
-   * 统一表格广播 — 向所有已启用通道发送测速结果表格
-   */
   async broadcastTable(record: SpeedTestRecord, reason: string) {
-    const promises: Promise<void>[] = []
-
-    if (this.alert.slackEnabled && this.alert.slackWebhookUrl) {
-      promises.push(this.sendSlackTable(record, reason))
-    }
-    if (this.alert.dingtalk.enabled && this.alert.dingtalk.webhookUrl) {
-      promises.push(this.sendDingTalkTable(record, reason))
-    }
-    if (this.alert.feishu.enabled && this.alert.feishu.webhookUrl) {
-      promises.push(this.sendFeishuTable(record, reason))
-    }
-
-    await Promise.allSettled(promises)
+    await Promise.allSettled([
+      this.alert.slackEnabled && this.alert.slackWebhookUrl ? this.sendSlackTable(record, reason) : null,
+      this.alert.dingtalk.enabled && this.alert.dingtalk.webhookUrl ? this.sendDingTalkTable(record, reason) : null,
+      this.alert.feishu.enabled && this.alert.feishu.webhookUrl ? this.sendFeishuTable(record, reason) : null,
+    ].filter(Boolean))
   }
 
-  setCallbacks(
-    onStart: () => void,
-    onStop: (reason: string) => void,
-    onRecord: (record: SpeedTestRecord) => void,
-  ) {
-    this.onStart = onStart
-    this.onStop = onStop
-    this.onRecord = onRecord
+  setCallbacks(onStart: () => void, onStop: (reason: string) => void, onRecord: (record: SpeedTestRecord) => void) {
+    this.onStart = onStart; this.onStop = onStop; this.onRecord = onRecord
   }
 
-  /**
-   * 更新 cron 表达式并重新解析
-   */
   setCronExpression(expr: string): boolean {
     const parsed = parseCron(expr)
     if (!parsed) return false
-    this.scheduler.cronExpression = expr
-    this.cronFields = parsed
-    return true
+    this.scheduler.cronExpression = expr; this.cronFields = parsed; return true
   }
 
-  /**
-   * 开始定时测速调度
-   */
   startScheduler() {
     if (!this.scheduler.enabled) return
     this.cronFields = parseCron(this.scheduler.cronExpression)
-    this.currentRound = 0
-    this.scheduleNext()
+    this.currentRound = 0; this.scheduleNext()
   }
 
   stopScheduler() {
-    if (this.schedulerTimer) {
-      clearTimeout(this.schedulerTimer)
-      this.schedulerTimer = null
-    }
-    if (this.durationTimer) {
-      clearTimeout(this.durationTimer)
-      this.durationTimer = null
-    }
+    if (this.schedulerTimer) { clearTimeout(this.schedulerTimer); this.schedulerTimer = null }
+    if (this.durationTimer) { clearTimeout(this.durationTimer); this.durationTimer = null }
     this.isRunning = false
   }
 
   onTestStart(bytesUsed: number) {
-    this.testStartTime = Date.now()
-    this.testStartBytes = bytesUsed
-    this.peakSpeed = 0
-    this.speedSamples = []
-    this.isRunning = true
-
+    this.testStartTime = Date.now(); this.testStartBytes = bytesUsed
+    this.peakSpeed = 0; this.speedSamples = []; this.isRunning = true
     if (this.scheduler.durationMs > 0 && this.scheduler.enabled) {
-      this.durationTimer = setTimeout(() => {
-        this.stopTest('schedule')
-      }, this.scheduler.durationMs)
+      this.durationTimer = setTimeout(() => this.stopTest('schedule'), this.scheduler.durationMs)
     }
   }
 
   onTick(bytesUsed: number, currentSpeed: number): boolean {
     if (!this.isRunning) return false
-
-    if (currentSpeed > 0) {
-      this.speedSamples.push(currentSpeed)
-      if (currentSpeed > this.peakSpeed) {
-        this.peakSpeed = currentSpeed
-      }
-    }
-
-    const testBytesUsed = bytesUsed - this.testStartBytes
-    if (testBytesUsed >= this.scheduler.trafficLimitBytes) {
-      this.stopTest('traffic_limit')
-      return true
-    }
-
+    if (currentSpeed > 0) { this.speedSamples.push(currentSpeed); if (currentSpeed > this.peakSpeed) this.peakSpeed = currentSpeed }
+    if (bytesUsed - this.testStartBytes >= this.scheduler.trafficLimitBytes) { this.stopTest('traffic_limit'); return true }
     if (this.alert.enabled && this.alert.minSpeed > 0) {
-      const recentSamples = this.speedSamples.slice(-5)
-      if (recentSamples.length >= 5) {
-        const avgRecent = recentSamples.reduce((a, b) => a + b, 0) / recentSamples.length
-        if (avgRecent < this.alert.minSpeed && avgRecent > 0) {
-          const alertMsg = `⚠️ 速度告警：当前速度 ${this.formatSpeed(avgRecent)} 低于阈值 ${this.formatSpeed(this.alert.minSpeed)}`
-          this.alert.onAlert(alertMsg, 'warning')
-          this.broadcastAlert(
-            `*速度告警*\n• 当前速度: ${this.formatSpeed(avgRecent)}\n• 阈值: ${this.formatSpeed(this.alert.minSpeed)}`,
-            'warning'
-          )
+      const recent = this.speedSamples.slice(-5)
+      if (recent.length >= 5) {
+        const avg = recent.reduce((a, b) => a + b, 0) / recent.length
+        if (avg < this.alert.minSpeed && avg > 0) {
+          const msg = `⚠️ 速度告警：当前速度 ${this.formatSpeed(avg)} 低于阈值 ${this.formatSpeed(this.alert.minSpeed)}`
+          this.alert.onAlert(msg, 'warning')
+          this.broadcastAlert(`*速度告警*\n• 当前速度: ${this.formatSpeed(avg)}\n• 阈值: ${this.formatSpeed(this.alert.minSpeed)}`, 'warning')
         }
       }
     }
-
     return false
   }
 
   onTestEnd(bytesUsed: number, reason: 'manual' | 'traffic_limit' | 'schedule' | 'alert' = 'manual') {
     if (!this.isRunning && reason === 'manual') return
     this.isRunning = false
-
-    if (this.durationTimer) {
-      clearTimeout(this.durationTimer)
-      this.durationTimer = null
-    }
-
+    if (this.durationTimer) { clearTimeout(this.durationTimer); this.durationTimer = null }
     const duration = (Date.now() - this.testStartTime) / 1000
     const testBytes = bytesUsed - this.testStartBytes
     const avgSpeed = duration > 0 ? testBytes / duration : 0
-
-    const record: SpeedTestRecord = {
-      timestamp: this.testStartTime,
-      duration,
-      bytesUsed: testBytes,
-      avgSpeed,
-      avgBandwidth: avgSpeed * 8,
-      peakSpeed: this.peakSpeed,
-      stopped: reason,
-    }
-
-    this.records.push(record)
-    this.saveToStorage()
-
-    if (this.onRecord) {
-      this.onRecord(record)
-    }
-
-    const reasonText: Record<string, string> = {
-      manual: '手动停止',
-      traffic_limit: '流量达到上限',
-      schedule: '定时结束',
-      alert: '告警触发',
-    }
-
+    const record: SpeedTestRecord = { timestamp: this.testStartTime, duration, bytesUsed: testBytes, avgSpeed, avgBandwidth: avgSpeed * 8, peakSpeed: this.peakSpeed, stopped: reason }
+    this.records.push(record); this.saveToStorage()
+    if (this.onRecord) this.onRecord(record)
     if (this.alert.enabled) {
-      const message =
-        `✅ 测速完成（${reasonText[reason]}）\n` +
-        `时长: ${this.formatDuration(duration)}\n` +
-        `流量: ${this.formatBytes(testBytes)}\n` +
-        `平均速度: ${this.formatSpeed(avgSpeed)}\n` +
-        `平均带宽: ${this.formatBandwidth(avgSpeed * 8)}\n` +
-        `峰值速度: ${this.formatSpeed(this.peakSpeed)}`
-
-      this.alert.onAlert(message, 'success')
-      // 发送表格格式到所有 IM 通道
+      const msg = `✅ 测速完成（${STOP_REASONS[reason]}）\n时长: ${this.formatDuration(duration)}\n流量: ${this.formatBytes(testBytes)}\n平均速度: ${this.formatSpeed(avgSpeed)}\n平均带宽: ${this.formatBandwidth(avgSpeed * 8)}\n峰值速度: ${this.formatSpeed(this.peakSpeed)}`
+      this.alert.onAlert(msg, 'success')
       this.broadcastTable(record, reason)
     }
   }
 
-  stopTest(reason: 'manual' | 'traffic_limit' | 'schedule' | 'alert' = 'manual') {
-    if (this.onStop) {
-      this.onStop(reason)
-    }
-  }
+  stopTest(reason: 'manual' | 'traffic_limit' | 'schedule' | 'alert' = 'manual') { if (this.onStop) this.onStop(reason) }
 
   getStats() {
-    if (this.records.length === 0) {
-      return {
-        totalTests: 0,
-        avgSpeed: 0,
-        avgBandwidth: 0,
-        avgDuration: 0,
-        totalTraffic: 0,
-        peakSpeed: 0,
-        recentRecords: [],
-      }
-    }
-
-    const totalSpeed = this.records.reduce((sum, r) => sum + r.avgSpeed, 0)
-    const totalDuration = this.records.reduce((sum, r) => sum + r.duration, 0)
-    const totalTraffic = this.records.reduce((sum, r) => sum + r.bytesUsed, 0)
-    const peakSpeed = Math.max(...this.records.map(r => r.peakSpeed))
-
-    return {
-      totalTests: this.records.length,
-      avgSpeed: totalSpeed / this.records.length,
-      avgBandwidth: (totalSpeed / this.records.length) * 8,
-      avgDuration: totalDuration / this.records.length,
-      totalTraffic,
-      peakSpeed,
-      recentRecords: this.records.slice(-20).reverse(),
-    }
+    if (this.records.length === 0) return { totalTests: 0, avgSpeed: 0, avgBandwidth: 0, avgDuration: 0, totalTraffic: 0, peakSpeed: 0, recentRecords: [] }
+    const ts = this.records.reduce((s, r) => s + r.avgSpeed, 0)
+    const td = this.records.reduce((s, r) => s + r.duration, 0)
+    const tt = this.records.reduce((s, r) => s + r.bytesUsed, 0)
+    const ps = Math.max(...this.records.map(r => r.peakSpeed))
+    return { totalTests: this.records.length, avgSpeed: ts / this.records.length, avgBandwidth: (ts / this.records.length) * 8, avgDuration: td / this.records.length, totalTraffic: tt, peakSpeed: ps, recentRecords: this.records.slice(-20).reverse() }
   }
 
-  clearRecords() {
-    this.records = []
-    this.saveToStorage()
-  }
-
-  getIsRunning(): boolean {
-    return this.isRunning
-  }
-
-  // === 私有方法 ===
+  clearRecords() { this.records = []; this.saveToStorage() }
+  getIsRunning() { return this.isRunning }
 
   private scheduleNext() {
     if (!this.scheduler.enabled) return
-
-    let delay: number
-
-    if (this.cronFields) {
-      const d = nextCronDelay(this.cronFields)
-      delay = d >= 0 ? d : 60000 // fallback 1 分钟
-    } else {
-      delay = 60000
-    }
-
+    const delay = this.cronFields ? (nextCronDelay(this.cronFields) || 60000) : 60000
     this.schedulerTimer = setTimeout(() => {
       this.currentRound++
-      if (this.scheduler.maxRounds > 0 && this.currentRound > this.scheduler.maxRounds) {
-        this.stopScheduler()
-        if (this.alert.enabled) {
-          this.alert.onAlert(`🔔 定时测速已完成 ${this.scheduler.maxRounds} 轮`, 'success')
-        }
-        return
-      }
-
-      if (this.onStart) {
-        this.onStart()
-      }
-
+      if (this.scheduler.maxRounds > 0 && this.currentRound > this.scheduler.maxRounds) { this.stopScheduler(); if (this.alert.enabled) this.alert.onAlert(`🔔 定时测速已完成 ${this.scheduler.maxRounds} 轮`, 'success'); return }
+      if (this.onStart) this.onStart()
       this.scheduleNext()
     }, delay)
   }
@@ -902,114 +491,30 @@ ${text}
     try {
       localStorage.setItem('speedTestRecords', JSON.stringify(this.records.slice(-100)))
       localStorage.setItem('speedTestScheduler', JSON.stringify(this.scheduler))
-      localStorage.setItem('speedTestAlert', JSON.stringify({
-        enabled: this.alert.enabled,
-        minSpeed: this.alert.minSpeed,
-        maxLatency: this.alert.maxLatency,
-        slackWebhookUrl: this.alert.slackWebhookUrl,
-        slackEnabled: this.alert.slackEnabled,
-        dingtalk: this.alert.dingtalk,
-        feishu: this.alert.feishu,
-        slackProxy: this.alert.slackProxy,
-      }))
-    } catch (e) {
-      this.records = this.records.slice(-20)
-      try {
-        localStorage.setItem('speedTestRecords', JSON.stringify(this.records))
-      } catch (_) {}
-    }
+      localStorage.setItem('speedTestAlert', JSON.stringify({ enabled: this.alert.enabled, minSpeed: this.alert.minSpeed, maxLatency: this.alert.maxLatency, slackWebhookUrl: this.alert.slackWebhookUrl, slackEnabled: this.alert.slackEnabled, dingtalk: this.alert.dingtalk, feishu: this.alert.feishu, slackProxy: this.alert.slackProxy }))
+    } catch { this.records = this.records.slice(-20); try { localStorage.setItem('speedTestRecords', JSON.stringify(this.records)) } catch {} }
   }
 
   private loadFromStorage() {
     try {
-      const records = localStorage.getItem('speedTestRecords')
-      if (records) this.records = JSON.parse(records)
-
-      const scheduler = localStorage.getItem('speedTestScheduler')
-      if (scheduler) Object.assign(this.scheduler, JSON.parse(scheduler))
-
-      const alert = localStorage.getItem('speedTestAlert')
-      if (alert) {
-        const alertData = JSON.parse(alert)
-        this.alert.enabled = alertData.enabled ?? false
-        this.alert.minSpeed = alertData.minSpeed ?? 0
-        this.alert.maxLatency = alertData.maxLatency ?? 0
-        this.alert.slackWebhookUrl = alertData.slackWebhookUrl ?? ''
-        this.alert.slackEnabled = alertData.slackEnabled ?? false
-        // 钉钉
-        if (alertData.dingtalk) {
-          this.alert.dingtalk = {
-            enabled: alertData.dingtalk.enabled ?? false,
-            webhookUrl: alertData.dingtalk.webhookUrl ?? '',
-            secret: alertData.dingtalk.secret ?? '',
-            atMobiles: alertData.dingtalk.atMobiles ?? [],
-            atAll: alertData.dingtalk.atAll ?? false,
-          }
-        }
-        // 飞书
-        if (alertData.feishu) {
-          this.alert.feishu = {
-            enabled: alertData.feishu.enabled ?? false,
-            webhookUrl: alertData.feishu.webhookUrl ?? '',
-            secret: alertData.feishu.secret ?? '',
-          }
-        }
-        // Slack 代理
-        if (alertData.slackProxy) {
-          this.alert.slackProxy = {
-            enabled: alertData.slackProxy.enabled ?? false,
-            forwardToDingTalk: alertData.slackProxy.forwardToDingTalk ?? true,
-            forwardToFeishu: alertData.slackProxy.forwardToFeishu ?? true,
-          }
-        }
+      const r = localStorage.getItem('speedTestRecords'); if (r) this.records = JSON.parse(r)
+      const s = localStorage.getItem('speedTestScheduler'); if (s) Object.assign(this.scheduler, JSON.parse(s))
+      const a = localStorage.getItem('speedTestAlert')
+      if (a) {
+        const d = JSON.parse(a)
+        this.alert.enabled = d.enabled ?? false; this.alert.minSpeed = d.minSpeed ?? 0; this.alert.maxLatency = d.maxLatency ?? 0
+        this.alert.slackWebhookUrl = d.slackWebhookUrl ?? ''; this.alert.slackEnabled = d.slackEnabled ?? false
+        if (d.dingtalk) this.alert.dingtalk = { enabled: d.dingtalk.enabled ?? false, webhookUrl: d.dingtalk.webhookUrl ?? '', secret: d.dingtalk.secret ?? '', atMobiles: d.dingtalk.atMobiles ?? [], atAll: d.dingtalk.atAll ?? false }
+        if (d.feishu) this.alert.feishu = { enabled: d.feishu.enabled ?? false, webhookUrl: d.feishu.webhookUrl ?? '', secret: d.feishu.secret ?? '' }
+        if (d.slackProxy) this.alert.slackProxy = { enabled: d.slackProxy.enabled ?? false, forwardToDingTalk: d.slackProxy.forwardToDingTalk ?? true, forwardToFeishu: d.slackProxy.forwardToFeishu ?? true }
       }
-    } catch (e) {
-      console.warn('Failed to load scheduler config:', e)
-    }
+    } catch (e) { console.warn('Failed to load config:', e) }
   }
 
-  // === 格式化工具 ===
-
-  formatBytes(bytes: number): string {
-    const units = ['B', 'KB', 'MB', 'GB', 'TB']
-    let idx = 0
-    let val = bytes
-    while (val >= 1024 && idx < units.length - 1) {
-      val /= 1024
-      idx++
-    }
-    return val.toFixed(idx > 1 ? 2 : 0) + units[idx]
-  }
-
-  formatSpeed(bps: number): string {
-    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s']
-    let idx = 0
-    let val = bps
-    while (val >= 1024 && idx < units.length - 1) {
-      val /= 1024
-      idx++
-    }
-    return val.toFixed(idx > 1 ? 2 : 0) + units[idx]
-  }
-
-  formatBandwidth(bps: number): string {
-    const units = ['bps', 'Kbps', 'Mbps', 'Gbps']
-    let idx = 0
-    let val = bps
-    while (val >= 1000 && idx < units.length - 1) {
-      val /= 1000
-      idx++
-    }
-    return val.toFixed(idx > 1 ? 2 : 0) + units[idx]
-  }
-
-  formatDuration(seconds: number): string {
-    if (seconds < 60) return seconds.toFixed(0) + '秒'
-    const mins = seconds / 60
-    if (mins < 60) return mins.toFixed(1) + '分钟'
-    const hours = mins / 60
-    return hours.toFixed(1) + '小时'
-  }
+  formatBytes(bytes: number): string { const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0, v = bytes; while (v >= 1024 && i < 4) { v /= 1024; i++ } return v.toFixed(i > 1 ? 2 : 0) + u[i] }
+  formatSpeed(bps: number): string { const u = ['B/s', 'KB/s', 'MB/s', 'GB/s']; let i = 0, v = bps; while (v >= 1024 && i < 4) { v /= 1024; i++ } return v.toFixed(i > 1 ? 2 : 0) + u[i] }
+  formatBandwidth(bps: number): string { const u = ['bps', 'Kbps', 'Mbps', 'Gbps']; let i = 0, v = bps; while (v >= 1000 && i < 4) { v /= 1000; i++ } return v.toFixed(i > 1 ? 2 : 0) + u[i] }
+  formatDuration(seconds: number): string { if (seconds < 60) return seconds.toFixed(0) + '秒'; const m = seconds / 60; if (m < 60) return m.toFixed(1) + '分钟'; return (m / 60).toFixed(1) + '小时' }
 }
 
 export default SpeedTestScheduler
