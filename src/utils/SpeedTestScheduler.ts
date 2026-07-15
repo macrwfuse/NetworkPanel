@@ -390,7 +390,6 @@ ${this.formatSpeed(record.peakSpeed)}` }
     try {
       let url = this.alert.dingtalk.webhookUrl
 
-      // 如果配置了加签密钥，计算签名
       if (this.alert.dingtalk.secret) {
         const timestamp = Date.now()
         const sign = await dingTalkSign(this.alert.dingtalk.secret, timestamp)
@@ -398,26 +397,42 @@ ${this.formatSpeed(record.peakSpeed)}` }
         url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
       }
 
-      // 钉钉 markdown 用 **bold** 而非 *bold*
-      const dtText = text.replace(/\*([^*]+)\*/g, '**$1**')
+      const fullText = `${title}
 
+${text}
+
+🕐 ${new Date().toLocaleString()}`
+
+      // 优先用 markdown，标题+正文
       const body: any = {
         msgtype: 'markdown',
-        markdown: {
-          title,
-          text: `### ${title}\n\n${dtText}\n\n---\n🕐 ${new Date().toLocaleString()}`
-        },
+        markdown: { title, text: fullText },
         at: {
           atMobiles: this.alert.dingtalk.atMobiles || [],
           isAtAll: this.alert.dingtalk.atAll || false,
         }
       }
 
-      await fetch(url, {
+      const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       })
+
+      // 如果 markdown 失败，降级为 text
+      const result = await resp.json().catch(() => ({}))
+      if (result.errcode && result.errcode !== 0) {
+        console.warn('DingTalk markdown failed, falling back to text:', result)
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            msgtype: 'text',
+            text: { content: fullText },
+            at: body.at
+          })
+        })
+      }
     } catch (err) {
       console.error('DingTalk notification failed:', err)
     }
@@ -434,7 +449,6 @@ ${this.formatSpeed(record.peakSpeed)}` }
     try {
       let url = this.alert.feishu.webhookUrl
 
-      // 飞书加签
       if (this.alert.feishu.secret) {
         const timestamp = Math.floor(Date.now() / 1000).toString()
         const stringToSign = `${timestamp}\n${this.alert.feishu.secret}`
@@ -448,10 +462,10 @@ ${this.formatSpeed(record.peakSpeed)}` }
         url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
       }
 
-      // 飞书 markdown 也用 **bold**
-      const fsText = text.replace(/\*([^*]+)\*/g, '**$1**')
+      const fullText = `${title}\n\n${text}\n\n🕐 ${new Date().toLocaleString()}`
 
-      await fetch(url, {
+      // 先用卡片消息
+      const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -462,24 +476,32 @@ ${this.formatSpeed(record.peakSpeed)}` }
               template: type === 'error' ? 'red' : type === 'warning' ? 'orange' : 'green'
             },
             elements: [
-              { tag: 'markdown', content: fsText },
-              {
-                tag: 'note',
-                elements: [
-                  { tag: 'plain_text', content: `🕐 ${new Date().toLocaleString()}` }
-                ]
-              }
+              { tag: 'markdown', content: fullText }
             ]
           }
         })
       })
+
+      // 如果卡片失败，降级为 text
+      const result = await resp.json().catch(() => ({}))
+      if (result.code && result.code !== 0) {
+        console.warn('Feishu card failed, falling back to text:', result)
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            msg_type: 'text',
+            content: { text: fullText }
+          })
+        })
+      }
     } catch (err) {
       console.error('Feishu notification failed:', err)
     }
   }
 
   /**
-   * 发送测速结果到钉钉（纯文本，钉钉不支持markdown表格）
+   * 发送测速结果到钉钉
    */
   async sendDingTalkTable(record: SpeedTestRecord, reason: string) {
     if (!this.alert.dingtalk.enabled || !this.alert.dingtalk.webhookUrl) return
@@ -497,41 +519,57 @@ ${this.formatSpeed(record.peakSpeed)}` }
         url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
       }
 
+      const title = '✅ NetworkPanel 测速结果'
       const text = [
-        '### ✅ 测速结果',
+        `✅ **检测状态：**${reasonText[reason] || reason}`,
+        `🕐 **检测时间：**${new Date(record.timestamp).toLocaleString()}`,
+        `⏱ **测速耗时：**${this.formatDuration(record.duration)}`,
         '',
-        `- 停止原因：${reasonText[reason] || reason}`,
-        `- 测速时长：${this.formatDuration(record.duration)}`,
-        `- 使用流量：${this.formatBytes(record.bytesUsed)}`,
-        `- 平均速度：${this.formatSpeed(record.avgSpeed)}`,
-        `- 平均带宽：${this.formatBandwidth(record.avgBandwidth)}`,
-        `- 峰值速度：${this.formatSpeed(record.peakSpeed)}`,
+        '⬇ **平均速度：**' + this.formatSpeed(record.avgSpeed),
+        '⬆ **峰值速度：**' + this.formatSpeed(record.peakSpeed),
+        '📡 **平均带宽：**' + this.formatBandwidth(record.avgBandwidth),
         '',
-        `---`,
-        `🕐 ${new Date(record.timestamp).toLocaleString()}`
+        `📊 **使用流量：**${this.formatBytes(record.bytesUsed)}`,
       ].join('\n')
 
-      const body: any = {
-        msgtype: 'markdown',
-        markdown: { title: '✅ 测速结果', text },
-        at: {
-          atMobiles: this.alert.dingtalk.atMobiles || [],
-          isAtAll: this.alert.dingtalk.atAll || false,
-        }
-      }
-
-      await fetch(url, {
+      // 先尝试 markdown
+      const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
+        body: JSON.stringify({
+          msgtype: 'markdown',
+          markdown: { title, text },
+          at: {
+            atMobiles: this.alert.dingtalk.atMobiles || [],
+            isAtAll: this.alert.dingtalk.atAll || false,
+          }
+        })
       })
+
+      // markdown 失败则降级为 text
+      const result = await resp.json().catch(() => ({}))
+      if (result.errcode && result.errcode !== 0) {
+        console.warn('DingTalk markdown failed, falling back to text:', result)
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            msgtype: 'text',
+            text: { content: text },
+            at: {
+              atMobiles: this.alert.dingtalk.atMobiles || [],
+              isAtAll: this.alert.dingtalk.atAll || false,
+            }
+          })
+        })
+      }
     } catch (err) {
       console.error('DingTalk table notification failed:', err)
     }
   }
 
   /**
-   * 发送测速结果到飞书（用纯文本，避免表格渲染问题）
+   * 发送测速结果到飞书
    */
   async sendFeishuTable(record: SpeedTestRecord, reason: string) {
     if (!this.alert.feishu.enabled || !this.alert.feishu.webhookUrl) return
@@ -555,38 +593,49 @@ ${this.formatSpeed(record.peakSpeed)}` }
         url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
       }
 
-      // 飞书用分栏布局展示结果
       const content = [
-        `**停止原因**：${reasonText[reason] || reason}`,
-        `**测速时长**：${this.formatDuration(record.duration)}`,
-        `**使用流量**：${this.formatBytes(record.bytesUsed)}`,
-        `**平均速度**：${this.formatSpeed(record.avgSpeed)}`,
-        `**平均带宽**：${this.formatBandwidth(record.avgBandwidth)}`,
-        `**峰值速度**：${this.formatSpeed(record.peakSpeed)}`,
+        `✅ **检测状态：**${reasonText[reason] || reason}`,
+        `🕐 **检测时间：**${new Date(record.timestamp).toLocaleString()}`,
+        `⏱ **测速耗时：**${this.formatDuration(record.duration)}`,
+        '',
+        '⬇ **平均速度：**' + this.formatSpeed(record.avgSpeed),
+        '⬆ **峰值速度：**' + this.formatSpeed(record.peakSpeed),
+        '📡 **平均带宽：**' + this.formatBandwidth(record.avgBandwidth),
+        '',
+        `📊 **使用流量：**${this.formatBytes(record.bytesUsed)}`,
       ].join('\n')
 
-      await fetch(url, {
+      // 先尝试卡片消息
+      const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           msg_type: 'interactive',
           card: {
             header: {
-              title: { tag: 'plain_text', content: '✅ 测速结果' },
+              title: { tag: 'plain_text', content: '✅ NetworkPanel 测速结果' },
               template: 'green'
             },
             elements: [
-              { tag: 'markdown', content },
-              {
-                tag: 'note',
-                elements: [
-                  { tag: 'plain_text', content: `🕐 ${new Date(record.timestamp).toLocaleString()}` }
-                ]
-              }
+              { tag: 'markdown', content }
             ]
           }
         })
       })
+
+      // 卡片失败则降级为 text
+      const result = await resp.json().catch(() => ({}))
+      if (result.code && result.code !== 0) {
+        console.warn('Feishu card failed, falling back to text:', result)
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            msg_type: 'text',
+            content: { text: content }
+          })
+        })
+      }
     } catch (err) {
       console.error('Feishu table notification failed:', err)
     }
