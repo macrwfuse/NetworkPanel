@@ -576,6 +576,13 @@ const copyUrl = () => {
 
 // === 调度器配置变更回调 ===
 const onSchedulerConfigChange = (config: any) => {
+  // 如果 cron 表达式变更，使用 setCronExpression 验证
+  if (config.cronExpression && config.cronExpression !== scheduler.scheduler.cronExpression) {
+    if (!scheduler.setCronExpression(config.cronExpression)) {
+      ElMessage.error('无效的 Cron 表达式，请检查格式（分 时 日 月 周）')
+      return
+    }
+  }
   Object.assign(scheduler.scheduler, config)
   localStorage.setItem('speedTestScheduler', JSON.stringify(scheduler.scheduler))
   if (config.enabled) {
@@ -593,6 +600,11 @@ const onAlertConfigChange = (config: any) => {
     enabled: config.enabled,
     minSpeed: config.minSpeed,
     maxLatency: config.maxLatency,
+    slackWebhookUrl: config.slackWebhookUrl,
+    slackEnabled: config.slackEnabled,
+    dingtalk: config.dingtalk,
+    feishu: config.feishu,
+    slackProxy: config.slackProxy,
   }))
   ElMessage.success(config.enabled ? '告警已开启' : '告警已关闭')
 }
