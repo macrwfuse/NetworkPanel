@@ -398,11 +398,14 @@ ${this.formatSpeed(record.peakSpeed)}` }
         url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
       }
 
+      // 钉钉 markdown 用 **bold** 而非 *bold*
+      const dtText = text.replace(/\*([^*]+)\*/g, '**$1**')
+
       const body: any = {
         msgtype: 'markdown',
         markdown: {
           title,
-          text: `### ${title}\n\n${text}\n\n---\n🕐 ${new Date().toLocaleString()}`
+          text: `### ${title}\n\n${dtText}\n\n---\n🕐 ${new Date().toLocaleString()}`
         },
         at: {
           atMobiles: this.alert.dingtalk.atMobiles || [],
@@ -445,6 +448,9 @@ ${this.formatSpeed(record.peakSpeed)}` }
         url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
       }
 
+      // 飞书 markdown 也用 **bold**
+      const fsText = text.replace(/\*([^*]+)\*/g, '**$1**')
+
       await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -456,10 +462,7 @@ ${this.formatSpeed(record.peakSpeed)}` }
               template: type === 'error' ? 'red' : type === 'warning' ? 'orange' : 'green'
             },
             elements: [
-              {
-                tag: 'markdown',
-                content: text
-              },
+              { tag: 'markdown', content: fsText },
               {
                 tag: 'note',
                 elements: [
@@ -476,7 +479,7 @@ ${this.formatSpeed(record.peakSpeed)}` }
   }
 
   /**
-   * 发送测速结果表格到钉钉
+   * 发送测速结果到钉钉（纯文本，钉钉不支持markdown表格）
    */
   async sendDingTalkTable(record: SpeedTestRecord, reason: string) {
     if (!this.alert.dingtalk.enabled || !this.alert.dingtalk.webhookUrl) return
@@ -497,14 +500,12 @@ ${this.formatSpeed(record.peakSpeed)}` }
       const text = [
         '### ✅ 测速结果',
         '',
-        '| 指标 | 数值 |',
-        '| :--- | :--- |',
-        `| 停止原因 | ${reasonText[reason] || reason} |`,
-        `| 测速时长 | ${this.formatDuration(record.duration)} |`,
-        `| 使用流量 | ${this.formatBytes(record.bytesUsed)} |`,
-        `| 平均速度 | ${this.formatSpeed(record.avgSpeed)} |`,
-        `| 平均带宽 | ${this.formatBandwidth(record.avgBandwidth)} |`,
-        `| 峰值速度 | ${this.formatSpeed(record.peakSpeed)} |`,
+        `- 停止原因：${reasonText[reason] || reason}`,
+        `- 测速时长：${this.formatDuration(record.duration)}`,
+        `- 使用流量：${this.formatBytes(record.bytesUsed)}`,
+        `- 平均速度：${this.formatSpeed(record.avgSpeed)}`,
+        `- 平均带宽：${this.formatBandwidth(record.avgBandwidth)}`,
+        `- 峰值速度：${this.formatSpeed(record.peakSpeed)}`,
         '',
         `---`,
         `🕐 ${new Date(record.timestamp).toLocaleString()}`
@@ -530,7 +531,7 @@ ${this.formatSpeed(record.peakSpeed)}` }
   }
 
   /**
-   * 发送测速结果表格到飞书
+   * 发送测速结果到飞书（用纯文本，避免表格渲染问题）
    */
   async sendFeishuTable(record: SpeedTestRecord, reason: string) {
     if (!this.alert.feishu.enabled || !this.alert.feishu.webhookUrl) return
@@ -554,16 +555,14 @@ ${this.formatSpeed(record.peakSpeed)}` }
         url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
       }
 
-      // 飞书卡片用 markdown 表格
-      const mdTable = [
-        '| 指标 | 数值 |',
-        '| :--- | :--- |',
-        `| 停止原因 | ${reasonText[reason] || reason} |`,
-        `| 测速时长 | ${this.formatDuration(record.duration)} |`,
-        `| 使用流量 | ${this.formatBytes(record.bytesUsed)} |`,
-        `| 平均速度 | ${this.formatSpeed(record.avgSpeed)} |`,
-        `| 平均带宽 | ${this.formatBandwidth(record.avgBandwidth)} |`,
-        `| 峰值速度 | ${this.formatSpeed(record.peakSpeed)} |`,
+      // 飞书用分栏布局展示结果
+      const content = [
+        `**停止原因**：${reasonText[reason] || reason}`,
+        `**测速时长**：${this.formatDuration(record.duration)}`,
+        `**使用流量**：${this.formatBytes(record.bytesUsed)}`,
+        `**平均速度**：${this.formatSpeed(record.avgSpeed)}`,
+        `**平均带宽**：${this.formatBandwidth(record.avgBandwidth)}`,
+        `**峰值速度**：${this.formatSpeed(record.peakSpeed)}`,
       ].join('\n')
 
       await fetch(url, {
@@ -577,7 +576,7 @@ ${this.formatSpeed(record.peakSpeed)}` }
               template: 'green'
             },
             elements: [
-              { tag: 'markdown', content: mdTable },
+              { tag: 'markdown', content },
               {
                 tag: 'note',
                 elements: [
