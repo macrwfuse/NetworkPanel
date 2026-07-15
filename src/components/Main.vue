@@ -114,6 +114,10 @@
         @click="showSchedulerPanel = true">
           <el-icon><Setting /></el-icon>
         </el-button>
+      <el-button style="float: left;margin-top: -20px;margin-left: 15px" type="success" link
+        @click="showSpeedTest = true">
+          🚀
+        </el-button>
       <el-button style="float: right;margin-top: -20px;margin-right: 3px" type="primary" :icon="TrendCharts" link
         v-if="!chartShow" @click="chartShow = true" />
       <el-button style="float: right;margin-top: -20px;margin-right: 3px" type="primary" :icon="Hide" link
@@ -238,6 +242,7 @@
     @alert-change="onAlertConfigChange"
     @clear-records="onClearRecords"
   />
+  <SpeedTestUI v-model="showSpeedTest" />
   <audio v-if="isMobile && !isIOS && !isMiuiBrowser && runBackground" @canplay="() => { if (isRunning) audioDom.play() }"
     @pause="() => { if (runBackground) isRunning = false }" @play="isRunning = true" controls loop ref="audioDom"
     style="display:none">
@@ -255,6 +260,8 @@
 import type { EChartsType } from "echarts";
 import iosSound from "../assets/ios.mp3";
 import andoridSound from "../assets/android.mp3";
+import SpeedTestUI from './SpeedTest.vue'
+const showSpeedTest = ref(false)
 import { SpeedTestScheduler } from '../utils/SpeedTestScheduler'
 import AlertPanelUI from './AlertPanel.vue'
 const props = defineProps({
