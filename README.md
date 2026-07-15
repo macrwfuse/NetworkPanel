@@ -2,6 +2,11 @@
 
 测试您的网速，多出口查询您的ip地址。支持定时测速、2GB流量限制、多通道告警（Slack / 钉钉 / 飞书）。
 
+## 📦 下载
+
+- **最新 Release**: https://github.com/macrwfuse/NetworkPanel/releases/tag/v1.0.0
+- **Web 页面包**: [network-panel-web.tar.gz](https://github.com/macrwfuse/NetworkPanel/releases/download/v1.0.0/network-panel-web.tar.gz)（1.4MB，解压即部署）
+
 ## ✨ 功能特性
 
 - 🚀 网速测试 + 多出口 IP 查询
