@@ -323,6 +323,63 @@ export class SpeedTestScheduler {
   }
 
   /**
+   * 发送测速结果表格到 Slack
+   */
+  async sendSlackTable(record: SpeedTestRecord, reason: string) {
+    if (!this.alert.slackEnabled || !this.alert.slackWebhookUrl) return
+    try {
+      const reasonText: Record<string, string> = {
+        manual: '手动停止', traffic_limit: '流量上限', schedule: '定时结束', alert: '告警触发'
+      }
+      await fetch(this.alert.slackWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: '✅ *NetworkPanel 测速结果*',
+          blocks: [
+            {
+              type: 'header',
+              text: { type: 'plain_text', text: '✅ 测速结果', emoji: true }
+            },
+            {
+              type: 'section',
+              fields: [
+                { type: 'mrkdwn', text: `*停止原因*
+${reasonText[reason] || reason}` },
+                { type: 'mrkdwn', text: `*测速时长*
+${this.formatDuration(record.duration)}` },
+                { type: 'mrkdwn', text: `*使用流量*
+${this.formatBytes(record.bytesUsed)}` },
+                { type: 'mrkdwn', text: `*平均速度*
+${this.formatSpeed(record.avgSpeed)}` },
+                { type: 'mrkdwn', text: `*平均带宽*
+${this.formatBandwidth(record.avgBandwidth)}` },
+                { type: 'mrkdwn', text: `*峰值速度*
+${this.formatSpeed(record.peakSpeed)}` }
+              ]
+            },
+            {
+              type: 'context',
+              elements: [{ type: 'mrkdwn', text: `🕐 ${new Date(record.timestamp).toLocaleString()}` }]
+            }
+          ]
+        })
+      })
+
+      if (this.alert.slackProxy.enabled) {
+        if (this.alert.slackProxy.forwardToDingTalk) {
+          await this.sendDingTalkTable(record, reason)
+        }
+        if (this.alert.slackProxy.forwardToFeishu) {
+          await this.sendFeishuTable(record, reason)
+        }
+      }
+    } catch (err) {
+      console.error('Slack table notification failed:', err)
+    }
+  }
+
+  /**
    * 发送钉钉 Webhook 通知
    */
   async sendDingTalkNotification(text: string, type: 'warning' | 'error' | 'success' = 'success') {
@@ -419,6 +476,124 @@ export class SpeedTestScheduler {
   }
 
   /**
+   * 发送测速结果表格到钉钉
+   */
+  async sendDingTalkTable(record: SpeedTestRecord, reason: string) {
+    if (!this.alert.dingtalk.enabled || !this.alert.dingtalk.webhookUrl) return
+    const reasonText: Record<string, string> = {
+      manual: '手动停止', traffic_limit: '流量上限', schedule: '定时结束', alert: '告警触发'
+    }
+
+    try {
+      let url = this.alert.dingtalk.webhookUrl
+
+      if (this.alert.dingtalk.secret) {
+        const timestamp = Date.now()
+        const sign = await dingTalkSign(this.alert.dingtalk.secret, timestamp)
+        const sep = url.includes('?') ? '&' : '?'
+        url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
+      }
+
+      const text = [
+        '### ✅ 测速结果',
+        '',
+        '| 指标 | 数值 |',
+        '| :--- | :--- |',
+        `| 停止原因 | ${reasonText[reason] || reason} |`,
+        `| 测速时长 | ${this.formatDuration(record.duration)} |`,
+        `| 使用流量 | ${this.formatBytes(record.bytesUsed)} |`,
+        `| 平均速度 | ${this.formatSpeed(record.avgSpeed)} |`,
+        `| 平均带宽 | ${this.formatBandwidth(record.avgBandwidth)} |`,
+        `| 峰值速度 | ${this.formatSpeed(record.peakSpeed)} |`,
+        '',
+        `---`,
+        `🕐 ${new Date(record.timestamp).toLocaleString()}`
+      ].join('\n')
+
+      const body: any = {
+        msgtype: 'markdown',
+        markdown: { title: '✅ 测速结果', text },
+        at: {
+          atMobiles: this.alert.dingtalk.atMobiles || [],
+          isAtAll: this.alert.dingtalk.atAll || false,
+        }
+      }
+
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+    } catch (err) {
+      console.error('DingTalk table notification failed:', err)
+    }
+  }
+
+  /**
+   * 发送测速结果表格到飞书
+   */
+  async sendFeishuTable(record: SpeedTestRecord, reason: string) {
+    if (!this.alert.feishu.enabled || !this.alert.feishu.webhookUrl) return
+    const reasonText: Record<string, string> = {
+      manual: '手动停止', traffic_limit: '流量上限', schedule: '定时结束', alert: '告警触发'
+    }
+
+    try {
+      let url = this.alert.feishu.webhookUrl
+
+      if (this.alert.feishu.secret) {
+        const timestamp = Math.floor(Date.now() / 1000).toString()
+        const stringToSign = `${timestamp}\n${this.alert.feishu.secret}`
+        const encoder = new TextEncoder()
+        const key = await crypto.subtle.importKey(
+          'raw', encoder.encode(stringToSign), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+        )
+        const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(stringToSign))
+        const sign = btoa(String.fromCharCode(...new Uint8Array(signature)))
+        const sep = url.includes('?') ? '&' : '?'
+        url = `${url}${sep}timestamp=${timestamp}&sign=${encodeURIComponent(sign)}`
+      }
+
+      // 飞书卡片用 markdown 表格
+      const mdTable = [
+        '| 指标 | 数值 |',
+        '| :--- | :--- |',
+        `| 停止原因 | ${reasonText[reason] || reason} |`,
+        `| 测速时长 | ${this.formatDuration(record.duration)} |`,
+        `| 使用流量 | ${this.formatBytes(record.bytesUsed)} |`,
+        `| 平均速度 | ${this.formatSpeed(record.avgSpeed)} |`,
+        `| 平均带宽 | ${this.formatBandwidth(record.avgBandwidth)} |`,
+        `| 峰值速度 | ${this.formatSpeed(record.peakSpeed)} |`,
+      ].join('\n')
+
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          msg_type: 'interactive',
+          card: {
+            header: {
+              title: { tag: 'plain_text', content: '✅ 测速结果' },
+              template: 'green'
+            },
+            elements: [
+              { tag: 'markdown', content: mdTable },
+              {
+                tag: 'note',
+                elements: [
+                  { tag: 'plain_text', content: `🕐 ${new Date(record.timestamp).toLocaleString()}` }
+                ]
+              }
+            ]
+          }
+        })
+      })
+    } catch (err) {
+      console.error('Feishu table notification failed:', err)
+    }
+  }
+
+  /**
    * 统一告警广播 — 向所有已启用通道发送通知
    */
   async broadcastAlert(text: string, type: 'warning' | 'error' | 'success' = 'success') {
@@ -432,6 +607,25 @@ export class SpeedTestScheduler {
     }
     if (this.alert.feishu.enabled && this.alert.feishu.webhookUrl) {
       promises.push(this.sendFeishuNotification(text, type))
+    }
+
+    await Promise.allSettled(promises)
+  }
+
+  /**
+   * 统一表格广播 — 向所有已启用通道发送测速结果表格
+   */
+  async broadcastTable(record: SpeedTestRecord, reason: string) {
+    const promises: Promise<void>[] = []
+
+    if (this.alert.slackEnabled && this.alert.slackWebhookUrl) {
+      promises.push(this.sendSlackTable(record, reason))
+    }
+    if (this.alert.dingtalk.enabled && this.alert.dingtalk.webhookUrl) {
+      promises.push(this.sendDingTalkTable(record, reason))
+    }
+    if (this.alert.feishu.enabled && this.alert.feishu.webhookUrl) {
+      promises.push(this.sendFeishuTable(record, reason))
     }
 
     await Promise.allSettled(promises)
@@ -575,7 +769,8 @@ export class SpeedTestScheduler {
         `峰值速度: ${this.formatSpeed(this.peakSpeed)}`
 
       this.alert.onAlert(message, 'success')
-      this.broadcastAlert(message, 'success')
+      // 发送表格格式到所有 IM 通道
+      this.broadcastTable(record, reason)
     }
   }
 
