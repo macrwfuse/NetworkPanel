@@ -1,9 +1,11 @@
 # ============================================
 # Stage 1: 构建
 # ============================================
-FROM node:20-alpine AS builder
+FROM docker.1ms.run/node:20-alpine AS builder
 
 WORKDIR /app
+
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
 # 安装 pnpm
 RUN corepack enable && corepack prepare pnpm@10 --activate
@@ -23,15 +25,18 @@ RUN pnpm run build
 # ============================================
 # Stage 2: 运行
 # ============================================
-FROM node:20-alpine
+FROM docker.1ms.run/node:20-alpine
 
 WORKDIR /app
+
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+    apk add --no-cache nginx
 
 # 安装 nginx
 RUN apk add --no-cache nginx
 
 # 复制 nginx 配置
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx.conf /etc/nginx/http.d/default.conf
 
 # 复制构建产物
 COPY --from=builder /app/dist /usr/share/nginx/html
